@@ -9,12 +9,78 @@
 #include <unistd.h>
 
 #define MAX_ARGS 64
+#define MAX_CMDS 10
 #define MAX_INP 1024
+
+void exec_pipe_cmd(char *args[]) {
+  int num_cmd = 0;
+  char *commands[MAX_CMDS][MAX_ARGS];
+  int arg_index = 0;
+
+  for (int i = 0; args[i] != NULL; i++) {
+    if (strcmp(args[i], "|") == 0) {
+      commands[num_cmd][arg_index] = NULL;
+      num_cmd++;
+      arg_index = 0;
+    } else {
+      commands[num_cmd][arg_index++] = args[i];
+    }
+  }
+  commands[num_cmd][arg_index] = NULL;
+  num_cmd++;
+
+  int prev_pipe[2];
+
+  for (int i = 0; i < num_cmd; i++) {
+    int curr_pipe[2];
+
+    if (i < num_cmd - 1) {
+      if (pipe(curr_pipe) == -1) {
+        perror("pipe failed");
+        exit(1);
+      }
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+      // Child process
+      if (i > 0) {
+        dup2(prev_pipe[0], STDIN_FILENO);
+        close(prev_pipe[0]);
+        close(prev_pipe[1]);
+      }
+      if (i < num_cmd - 1) {
+        dup2(curr_pipe[1], STDOUT_FILENO);
+        close(curr_pipe[0]);
+        close(curr_pipe[1]);
+      }
+      execvp(commands[i][0], commands[i]);
+      perror("execvp failed");
+      exit(1);
+    } else if (pid > 0) {
+      // Parent process
+      if (i > 0) {
+        close(prev_pipe[0]);
+        close(prev_pipe[1]);
+      }
+      if (i < num_cmd - 1) {
+        prev_pipe[0] = curr_pipe[0];
+        prev_pipe[1] = curr_pipe[1];
+      }
+    } else {
+      perror("fork failed");
+      exit(1);
+    }
+  }
+
+  for (int i = 0; i < num_cmd; i++) {
+    wait(NULL);
+  }
+}
 
 int main(int argc, char *argv[]) {
   char *args[MAX_ARGS];
   char inp[MAX_INP];
-
   char cwd[PATH_MAX];
   char hostname[HOST_NAME_MAX + 1];
 
@@ -67,6 +133,9 @@ int main(int argc, char *argv[]) {
     }
     args[argc] = NULL;
 
+    if (args[0] == NULL)
+      continue;
+
     if (strcmp(args[0], "exit") == 0)
       break;
 
@@ -75,21 +144,37 @@ int main(int argc, char *argv[]) {
       if (chdir(path) != 0) {
         perror("cd failed");
       }
+      for (int i = 0; i < argc; i++)
+        free(args[i]);
       continue;
     }
 
-    pid_t pid = fork();
-    if (pid == 0) {
-      execvp(args[0], args);
-      perror("execvp failed");
-      exit(1);
-    } else if (pid > 0) {
-      wait(NULL);
-      for (int i = 0; i < argc; i++)
-        free(args[i]);
-    } else {
-      perror("fork failed");
+    int is_piped = 0;
+    for (int i = 0; args[i] != NULL; i++) {
+      if (strcmp(args[i], "|") == 0) {
+        is_piped = 1;
+        break;
+      }
     }
+
+    if (is_piped) {
+      exec_pipe_cmd(args);
+    } else {
+      pid_t pid = fork();
+      if (pid == 0) {
+        execvp(args[0], args);
+        perror("execvp failed");
+        exit(1);
+      } else if (pid > 0) {
+        wait(NULL);
+      } else {
+        perror("fork failed");
+      }
+    }
+
+    for (int i = 0; i < argc; i++)
+      free(args[i]);
   }
+
   return 0;
 }
