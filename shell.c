@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termio.h>
 #include <unistd.h>
 
 #define MAX_ARGS 64
@@ -14,23 +15,54 @@
 #define MAX_INP 1024
 #define MAX_JOBS 100
 
+enum JobState { RUNNING, STOPPED };
+
 typedef struct {
   int job_id;
   pid_t pid;
   char command[256];
   int active;
-  struct job *next;
+  enum JobState state;
 } Job;
 
 Job jobs[MAX_JOBS];
-int job_count = 0;
 
-void add_job(pid_t pid, char *command) {
+int current_fg_pid = -1;
+int job_count = 0;
+char og_inp[MAX_INP];
+
+void sigtstp_handler(int sig) {
+  if (current_fg_pid > 0) {
+    kill(current_fg_pid, SIGTSTP);
+  }
+
+  int found = 0;
+  for (int i = 0; i < job_count; i++) {
+    if (jobs[i].pid == current_fg_pid && jobs[i].active) {
+      jobs[i].state = STOPPED;
+      found = 1;
+      break;
+    }
+  }
+
+  if (!found && job_count < MAX_JOBS) {
+    snprintf(jobs[job_count].command, sizeof(jobs[job_count].command), "%s",
+             og_inp);
+    jobs[job_count].pid = current_fg_pid;
+    jobs[job_count].state = STOPPED;
+    jobs[job_count].active = 1;
+    job_count++;
+  }
+}
+
+void add_job(pid_t pid, char *command, enum JobState state) {
   if (job_count < MAX_JOBS) {
-    jobs[job_count].pid = pid;
     strncpy(jobs[job_count].command, command,
             sizeof(jobs[job_count].command) - 1);
     jobs[job_count].active = 1;
+    jobs[job_count].pid = pid;
+    jobs[job_count].state = state;
+
     job_count++;
   }
 }
@@ -57,7 +89,7 @@ void show_jobs() {
 }
 
 void exec_cmd(char *args[], char *og_inp) {
-  int i;
+  int i = 0;
   int is_bg = 0;
 
   while (args[i] != NULL)
@@ -71,15 +103,19 @@ void exec_cmd(char *args[], char *og_inp) {
   pid_t pid = fork();
 
   if (pid == 0) {
+    current_fg_pid = pid;
     execvp(args[0], args);
+    current_fg_pid = -1;
     perror("execvp failed");
     exit(1);
   } else if (pid > 0) {
     if (!is_bg) {
+      current_fg_pid = pid;
       waitpid(pid, NULL, 0);
+      current_fg_pid = -1;
     } else {
       printf("[Background pid %d] [Process name: %s]\n", pid, args[0]);
-      add_job(pid, og_inp);
+      add_job(pid, og_inp, RUNNING);
     }
   } else {
     perror("fork failed");
@@ -156,13 +192,13 @@ int main(int argc, char *argv[]) {
   char inp[MAX_INP];
   char cwd[PATH_MAX];
   char hostname[HOST_NAME_MAX + 1];
-  char og_inp[MAX_INP];
 
   int res = gethostname(hostname, HOST_NAME_MAX);
   uid_t uid = getuid();
   struct passwd *pw = getpwuid(uid);
 
   printf("\x1b[2J\x1b[H");
+  signal(SIGTSTP, sigtstp_handler);
 
   while (1) {
     if (getcwd(cwd, sizeof(cwd)) != NULL)
@@ -213,8 +249,23 @@ int main(int argc, char *argv[]) {
       continue;
 
     strcpy(og_inp, inp);
-    if (strcmp(args[0], "exit") == 0)
-      break;
+
+    if (strcmp(args[0], "bg") == 0) {
+      if (args[1] == NULL) {
+        fprintf(stderr, "Usage: bg <job_id>\n");
+      } else {
+        int job_id = atoi(args[1]) - 1;
+        if (job_id >= 0 && job_id < job_count && jobs[job_id].active) {
+          kill(jobs[job_id].pid, SIGCONT);
+          jobs[job_id].state = RUNNING;
+          printf("[Resumed in background] [%d] %s\n", jobs[job_id].pid,
+                 jobs[job_id].command);
+        } else {
+          fprintf(stderr, "Invalid job ID: %s\n", args[1]);
+        }
+      }
+      continue;
+    }
 
     if (strcmp(args[0], "cd") == 0) {
       const char *path = args[1] ? args[1] : getenv("HOME");
@@ -223,6 +274,27 @@ int main(int argc, char *argv[]) {
       }
       for (int i = 0; i < argc; i++)
         free(args[i]);
+      continue;
+    }
+
+    if (strcmp(args[0], "exit") == 0)
+      break;
+
+    if (strcmp(args[0], "fg") == 0) {
+      if (args[1] == NULL)
+        fprintf(stderr, "Usage: fg <job_id>\n");
+
+      int job_id = atoi(args[1]) - 1;
+      if (job_id >= 0 && job_id < job_count && jobs[job_id].active) {
+        current_fg_pid = jobs[job_id].pid;
+        kill(current_fg_pid, SIGCONT);
+        jobs[job_id].state = RUNNING;
+        waitpid(current_fg_pid, NULL, 0);
+        current_fg_pid = -1;
+      } else {
+        fprintf(stderr, "Invalid job_id: %s\n", args[1]);
+      }
+
       continue;
     }
 
