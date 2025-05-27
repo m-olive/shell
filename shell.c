@@ -15,9 +15,11 @@
 #define MAX_JOBS 100
 
 typedef struct {
+  int job_id;
   pid_t pid;
   char command[256];
   int active;
+  struct job *next;
 } Job;
 
 Job jobs[MAX_JOBS];
@@ -54,7 +56,7 @@ void show_jobs() {
   }
 }
 
-void exec_cmd(char *args[]) {
+void exec_cmd(char *args[], char *og_inp) {
   int i;
   int is_bg = 0;
 
@@ -77,7 +79,7 @@ void exec_cmd(char *args[]) {
       waitpid(pid, NULL, 0);
     } else {
       printf("[Background pid %d] [Process name: %s]\n", pid, args[0]);
-      add_job(pid, args[0]);
+      add_job(pid, og_inp);
     }
   } else {
     perror("fork failed");
@@ -154,6 +156,7 @@ int main(int argc, char *argv[]) {
   char inp[MAX_INP];
   char cwd[PATH_MAX];
   char hostname[HOST_NAME_MAX + 1];
+  char og_inp[MAX_INP];
 
   int res = gethostname(hostname, HOST_NAME_MAX);
   uid_t uid = getuid();
@@ -209,6 +212,7 @@ int main(int argc, char *argv[]) {
     if (args[0] == NULL)
       continue;
 
+    strcpy(og_inp, inp);
     if (strcmp(args[0], "exit") == 0)
       break;
 
@@ -238,7 +242,7 @@ int main(int argc, char *argv[]) {
     if (is_piped) {
       exec_pipe_cmd(args);
     } else {
-      exec_cmd(args);
+      exec_cmd(args, og_inp);
     }
 
     for (int i = 0; i < argc; i++)
