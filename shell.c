@@ -1,6 +1,7 @@
 #include <limits.h>
 #include <linux/limits.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,34 @@
 #define MAX_ARGS 64
 #define MAX_CMDS 10
 #define MAX_INP 1024
+
+void exec_cmd(char *args[]) {
+  int is_bg = 0;
+
+  int i;
+  for (i = 0; args[i] != NULL; i++)
+    ;
+  if (i > 0 && strcmp(args[i - 1], "&") == 0) {
+    is_bg = 1;
+    args[i - 1] = NULL;
+  }
+
+  pid_t pid = fork();
+
+  if (pid == 0) {
+    execvp(args[0], args);
+    perror("execvp failed");
+    exit(1);
+  } else if (pid > 0) {
+    if (!is_bg) {
+      waitpid(pid, NULL, 0);
+    } else {
+      printf("[Background pid %d] [Process name: %s]\n", pid, args[0]);
+    }
+  } else {
+    perror("fork failed");
+  }
+}
 
 void exec_pipe_cmd(char *args[]) {
   int num_cmd = 0;
@@ -26,6 +55,7 @@ void exec_pipe_cmd(char *args[]) {
       commands[num_cmd][arg_index++] = args[i];
     }
   }
+
   commands[num_cmd][arg_index] = NULL;
   num_cmd++;
 
@@ -43,7 +73,6 @@ void exec_pipe_cmd(char *args[]) {
 
     pid_t pid = fork();
     if (pid == 0) {
-      // Child process
       if (i > 0) {
         dup2(prev_pipe[0], STDIN_FILENO);
         close(prev_pipe[0]);
@@ -58,7 +87,6 @@ void exec_pipe_cmd(char *args[]) {
       perror("execvp failed");
       exit(1);
     } else if (pid > 0) {
-      // Parent process
       if (i > 0) {
         close(prev_pipe[0]);
         close(prev_pipe[1]);
@@ -105,6 +133,7 @@ int main(int argc, char *argv[]) {
 
     int argc = 0;
     char *p = inp;
+
     while (*p != '\0' && argc < MAX_ARGS - 1) {
       while (*p == ' ')
         p++;
@@ -131,6 +160,7 @@ int main(int argc, char *argv[]) {
       if (*p)
         p++;
     }
+
     args[argc] = NULL;
 
     if (args[0] == NULL)
@@ -160,16 +190,7 @@ int main(int argc, char *argv[]) {
     if (is_piped) {
       exec_pipe_cmd(args);
     } else {
-      pid_t pid = fork();
-      if (pid == 0) {
-        execvp(args[0], args);
-        perror("execvp failed");
-        exit(1);
-      } else if (pid > 0) {
-        wait(NULL);
-      } else {
-        perror("fork failed");
-      }
+      exec_cmd(args);
     }
 
     for (int i = 0; i < argc; i++)
