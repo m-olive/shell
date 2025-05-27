@@ -12,13 +12,55 @@
 #define MAX_ARGS 64
 #define MAX_CMDS 10
 #define MAX_INP 1024
+#define MAX_JOBS 100
+
+typedef struct {
+  pid_t pid;
+  char command[256];
+  int active;
+} Job;
+
+Job jobs[MAX_JOBS];
+int job_count = 0;
+
+void add_job(pid_t pid, char *command) {
+  if (job_count < MAX_JOBS) {
+    jobs[job_count].pid = pid;
+    strncpy(jobs[job_count].command, command,
+            sizeof(jobs[job_count].command) - 1);
+    jobs[job_count].active = 1;
+    job_count++;
+  }
+}
+
+void clean_jobs() {
+  for (int i = 0; i < job_count; i++) {
+    if (jobs[i].active) {
+      int status;
+      pid_t res = waitpid(jobs[i].pid, &status, WNOHANG);
+      if (res == jobs[i].pid) {
+        jobs[i].active = 0;
+      }
+    }
+  }
+}
+
+void show_jobs() {
+  clean_jobs();
+  for (int i = 0; i < job_count; i++) {
+    if (jobs[i].active) {
+      printf("[%d] %d %s\n", i + 1, jobs[i].pid, jobs[i].command);
+    }
+  }
+}
 
 void exec_cmd(char *args[]) {
+  int i;
   int is_bg = 0;
 
-  int i;
-  for (i = 0; args[i] != NULL; i++)
-    ;
+  while (args[i] != NULL)
+    i++;
+
   if (i > 0 && strcmp(args[i - 1], "&") == 0) {
     is_bg = 1;
     args[i - 1] = NULL;
@@ -35,6 +77,7 @@ void exec_cmd(char *args[]) {
       waitpid(pid, NULL, 0);
     } else {
       printf("[Background pid %d] [Process name: %s]\n", pid, args[0]);
+      add_job(pid, args[0]);
     }
   } else {
     perror("fork failed");
@@ -176,6 +219,11 @@ int main(int argc, char *argv[]) {
       }
       for (int i = 0; i < argc; i++)
         free(args[i]);
+      continue;
+    }
+
+    if (strcmp(args[0], "jobs") == 0) {
+      show_jobs();
       continue;
     }
 

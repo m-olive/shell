@@ -4,7 +4,7 @@
 This project is to create a terminal from scratch in C and add all functionality required.
 
 ## Current functionality:
-Currently this shell supports built-ins, custom handling of cd and exit, piping, background processes, and a colored terminal
+Currently this shell supports built-ins, piping, background processes, a colored terminal, and custom handling of jobs, cd, and exit
 
 ## Use
 In order to use this project, clone shell.c using "git clone https://github.com/m-olive/shell.git " (without the quotes) into the desired directory. Then run "gcc shell.c -o shell && ./shell" without the quotes.
