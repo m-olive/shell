@@ -8,20 +8,21 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termio.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define MAX_JOBS 100
 #define MAX_CMD_LEN 1024
 
-struct job {
+typedef struct {
   int id;
   pid_t pid;
   char command[MAX_CMD_LEN];
   int running;
   int stopped;
-};
+} Job;
 
-struct job jobs[MAX_JOBS];
+Job jobs[MAX_JOBS];
 int job_count = 0;
 pid_t current_fg_pid = 0;
 
@@ -102,6 +103,13 @@ void bring_fg(int id) {
   }
 }
 
+void disable_echoctl() {
+  struct termios term;
+  tcgetattr(STDIN_FILENO, &term);
+  term.c_lflag &= ~ECHOCTL;
+  tcsetattr(STDIN_FILENO, TCSANOW, &term);
+}
+
 void parse_args(char *input, char **args, int *is_bg) {
   int argc = 0;
   *is_bg = 0;
@@ -160,6 +168,7 @@ void exec_cmd(char *input) {
 
     return;
   } else if (strcmp(args[0], "exit") == 0) {
+    printf("\x1b[2J\x1b[H");
     exit(0);
 
   } else if (strcmp(args[0], "jobs") == 0) {
@@ -225,6 +234,8 @@ int main() {
   signal(SIGCHLD, sigchld_handler);
 
   printf("\x1b[2J\x1b[H");
+  disable_echoctl();
+
   while (1) {
     if (getcwd(cwd, sizeof(cwd)) != NULL)
       printf("\x1b[92m[%s]\x1b[0m on \x1b[33m[%s]\x1b[0m >> \x1b[95m%s\x1b[0m "
@@ -232,9 +243,12 @@ int main() {
              pw->pw_name, hostname, cwd);
     else
       perror("getcwd error");
+
     fflush(stdout);
+
     if (fgets(input, sizeof(input), stdin) == NULL)
       break;
+
     input[strcspn(input, "\n")] = '\0';
     exec_cmd(input);
   }
