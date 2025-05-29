@@ -25,6 +25,7 @@ typedef struct {
 
 pid_t current_fg_pid = 0;
 char history[50][1024];
+int history_count = 0;
 Job jobs[MAX_JOBS];
 int job_count = 0;
 
@@ -121,6 +122,12 @@ void restore_term_settings() {
   tcsetattr(STDIN_FILENO, TCSANOW, &term);
 }
 
+void add_to_history(char *command) {
+  if (strlen(command) > 0 && history_count < 50) {
+    strcpy(history[history_count++], command);
+  }
+}
+
 void parse_args(char *input, char **args, int *is_bg) {
   int argc = 0;
   *is_bg = 0;
@@ -178,6 +185,7 @@ void exec_cmd(char *input) {
       }
       chdir(home);
     }
+    add_to_history(input);
     return;
 
   } else if (strcmp(args[0], "exit") == 0) {
@@ -187,18 +195,28 @@ void exec_cmd(char *input) {
 
   } else if (strcmp(args[0], "jobs") == 0) {
     show_jobs();
+    add_to_history(input);
     return;
 
   } else if (strcmp(args[0], "fg") == 0) {
     if (args[1]) {
       bring_fg(atoi(args[1]));
+      add_to_history(input);
     }
     return;
 
   } else if (strcmp(args[0], "bg") == 0) {
     if (args[1]) {
       continue_job(atoi(args[1]));
+      add_to_history(input);
     }
+    return;
+
+  } else if (strcmp(args[0], "history") == 0) {
+    for (int i = 0; i < history_count; i++) {
+      printf("%d: %s\n", i + 1, history[i]);
+    }
+    add_to_history(input);
     return;
   }
 
@@ -251,8 +269,12 @@ void exec_cmd(char *input) {
         int status;
         waitpid(pid, &status, WUNTRACED);
         current_fg_pid = 0;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+          add_to_history(input);
+        }
       } else {
         add_job(pid, input, 1);
+        add_to_history(input);
       }
     }
     return;
@@ -282,8 +304,18 @@ void exec_cmd(char *input) {
   for (int i = 0; i < 2 * (num_cmds - 1); i++)
     close(pipefds[i]);
 
-  for (int i = 0; i < num_cmds; i++)
-    wait(NULL);
+  int all_success = 1;
+  for (int i = 0; i < num_cmds; i++) {
+    int status;
+    wait(&status);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      all_success = 0;
+    }
+  }
+
+  if (all_success) {
+    add_to_history(input);
+  }
 }
 
 int main() {
@@ -315,7 +347,29 @@ int main() {
       break;
 
     input[strcspn(input, "\n")] = '\0';
-    exec_cmd(input);
+
+    if (strcmp(input, "!!") == 0) {
+      if (history_count > 0) {
+        strcpy(input, history[history_count - 1]);
+        printf("%s\n", input);
+      } else {
+        printf("No previous command in history\n");
+        continue;
+      }
+    } else if (input[0] == '!' && strlen(input) > 1) {
+      int n = atoi(input + 1);
+      if (n > 0 && n <= history_count) {
+        strcpy(input, history[n - 1]);
+        printf("%s\n", input);
+      } else {
+        printf("No such command in history\n");
+        continue;
+      }
+    }
+
+    if (strlen(input) > 0) {
+      exec_cmd(input);
+    }
   }
   return 0;
 }
