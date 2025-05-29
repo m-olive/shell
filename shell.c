@@ -1,3 +1,4 @@
+#include <fcntl.h>
 #include <limits.h>
 #include <linux/limits.h>
 #include <pwd.h>
@@ -62,7 +63,9 @@ void add_job(pid_t pid, char *command, int running) {
 void show_jobs() {
   for (int i = 0; i < job_count; i++) {
     const char *state = jobs[i].stopped ? "Stopped" : "Running";
-    printf("[%d] %d %s %s\n", jobs[i].id, jobs[i].pid, state, jobs[i].command);
+    printf("\x1b[95m[%d] ID:\x1b[0m %d / \x1b[95mStatus:\x1b[0m %s / "
+           "\x1b[95mCommand:\x1b[0m %s\n",
+           jobs[i].id, jobs[i].pid, state, jobs[i].command);
   }
 }
 
@@ -110,9 +113,17 @@ void disable_echoctl() {
   tcsetattr(STDIN_FILENO, TCSANOW, &term);
 }
 
+void restore_term_settings() {
+  struct termios term;
+  tcgetattr(STDIN_FILENO, &term);
+  term.c_lflag |= ECHOCTL;
+  tcsetattr(STDIN_FILENO, TCSANOW, &term);
+}
+
 void parse_args(char *input, char **args, int *is_bg) {
   int argc = 0;
   *is_bg = 0;
+
   while (*input) {
     while (*input == ' ')
       input++;
@@ -130,6 +141,7 @@ void parse_args(char *input, char **args, int *is_bg) {
       while (*input && *input != ' ')
         input++;
     }
+
     int len = input - start;
     if (len == 1 && start[0] == '&') {
       *is_bg = 1;
@@ -165,10 +177,11 @@ void exec_cmd(char *input) {
       }
       chdir(home);
     }
-
     return;
+
   } else if (strcmp(args[0], "exit") == 0) {
     printf("\x1b[2J\x1b[H");
+    restore_term_settings();
     exit(0);
 
   } else if (strcmp(args[0], "jobs") == 0) {
@@ -190,6 +203,30 @@ void exec_cmd(char *input) {
 
   pid_t pid = fork();
   if (pid == 0) {
+    for (int i = 0; args[i] != NULL; i++) {
+      if (strcmp(args[i], ">") == 0) {
+        int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        args[i] = NULL;
+        break;
+
+      } else if (strcmp(args[i], ">>") == 0) {
+        int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        args[i] = NULL;
+        break;
+
+      } else if (strcmp(args[i], "<") == 0) {
+        int fd = open(args[i + 1], O_RDONLY);
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+        args[i] = NULL;
+        break;
+      }
+    }
+
     setpgid(0, 0);
 
     if (!is_bg) {
@@ -220,7 +257,6 @@ void exec_cmd(char *input) {
     free(args[i]);
   }
 }
-
 int main() {
   char input[MAX_CMD_LEN];
   char cwd[PATH_MAX];
