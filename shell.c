@@ -23,9 +23,10 @@ typedef struct {
   int stopped;
 } Job;
 
+pid_t current_fg_pid = 0;
+char history[50][1024];
 Job jobs[MAX_JOBS];
 int job_count = 0;
-pid_t current_fg_pid = 0;
 
 void sigtstp_handler(int sig) {
   if (current_fg_pid > 0) {
@@ -201,62 +202,90 @@ void exec_cmd(char *input) {
     return;
   }
 
-  pid_t pid = fork();
-  if (pid == 0) {
-    for (int i = 0; args[i] != NULL; i++) {
-      if (strcmp(args[i], ">") == 0) {
-        int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-        args[i] = NULL;
-        break;
-
-      } else if (strcmp(args[i], ">>") == 0) {
-        int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-        args[i] = NULL;
-        break;
-
-      } else if (strcmp(args[i], "<") == 0) {
-        int fd = open(args[i + 1], O_RDONLY);
-        dup2(fd, STDIN_FILENO);
-        close(fd);
-        args[i] = NULL;
-        break;
-      }
-    }
-
-    setpgid(0, 0);
-
-    if (!is_bg) {
-      signal(SIGTSTP, SIG_DFL);
-    }
-    execvp(args[0], args);
-    perror("execvp failed");
-    exit(1);
-  } else if (pid > 0) {
-    setpgid(pid, pid);
-
-    if (is_bg) {
-      add_job(pid, input, 1);
-    } else {
-      current_fg_pid = pid;
-      signal(SIGTSTP, sigtstp_handler);
-
-      int status;
-      waitpid(pid, &status, WUNTRACED);
-      if (WIFSTOPPED(status)) {
-        add_job(pid, input, 0);
-      }
-      current_fg_pid = 0;
-    }
-  }
+  int num_cmds = 0;
+  char *cmds[10][64];
+  int cmd_index = 0, arg_index = 0;
 
   for (int i = 0; args[i] != NULL; i++) {
-    free(args[i]);
+    if (strcmp(args[i], "|") == 0) {
+      cmds[cmd_index][arg_index] = NULL;
+      cmd_index++;
+      arg_index = 0;
+    } else {
+      cmds[cmd_index][arg_index++] = args[i];
+    }
   }
+  cmds[cmd_index][arg_index] = NULL;
+  num_cmds = cmd_index + 1;
+
+  if (num_cmds == 1) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], ">") == 0) {
+          int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          dup2(fd, STDOUT_FILENO);
+          close(fd);
+          args[i] = NULL;
+          args[i + 1] = NULL;
+        } else if (strcmp(args[i], ">>") == 0) {
+          int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+          dup2(fd, STDOUT_FILENO);
+          close(fd);
+          args[i] = NULL;
+          args[i + 1] = NULL;
+        } else if (strcmp(args[i], "<") == 0) {
+          int fd = open(args[i + 1], O_RDONLY);
+          dup2(fd, STDIN_FILENO);
+          close(fd);
+          args[i] = NULL;
+          args[i + 1] = NULL;
+        }
+      }
+      execvp(args[0], args);
+      perror("exec failed");
+      exit(1);
+    } else {
+      if (!is_bg) {
+        current_fg_pid = pid;
+        int status;
+        waitpid(pid, &status, WUNTRACED);
+        current_fg_pid = 0;
+      } else {
+        add_job(pid, input, 1);
+      }
+    }
+    return;
+  }
+
+  int pipefds[2 * (num_cmds - 1)];
+  for (int i = 0; i < num_cmds - 1; i++)
+    pipe(pipefds + i * 2);
+
+  for (int i = 0; i < num_cmds; i++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      if (i != 0)
+        dup2(pipefds[(i - 1) * 2], 0);
+      if (i != num_cmds - 1)
+        dup2(pipefds[i * 2 + 1], 1);
+
+      for (int j = 0; j < 2 * (num_cmds - 1); j++)
+        close(pipefds[j]);
+
+      execvp(cmds[i][0], cmds[i]);
+      perror("exec failed");
+      exit(1);
+    }
+  }
+
+  for (int i = 0; i < 2 * (num_cmds - 1); i++)
+    close(pipefds[i]);
+
+  for (int i = 0; i < num_cmds; i++)
+    wait(NULL);
 }
+
 int main() {
   char input[MAX_CMD_LEN];
   char cwd[PATH_MAX];
