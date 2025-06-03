@@ -55,7 +55,8 @@ void sigchld_handler(int sig) {
 void add_job(pid_t pid, char *command, int running) {
   jobs[job_count].id = job_count + 1;
   jobs[job_count].pid = pid;
-  strncpy(jobs[job_count].command, command, MAX_CMD_LEN);
+  strncpy(jobs[job_count].command, command, MAX_CMD_LEN - 1);
+  jobs[job_count].command[MAX_CMD_LEN - 1] = '\0';
   jobs[job_count].running = running;
   jobs[job_count].stopped = !running;
 
@@ -128,6 +129,13 @@ void add_to_history(char *command) {
   }
 }
 
+// Helper function to free arguments array
+void free_args(char **args) {
+  for (int i = 0; args[i] != NULL; i++) {
+    free(args[i]);
+  }
+}
+
 void parse_args(char *input, char **args, int *is_bg) {
   int argc = 0;
   *is_bg = 0;
@@ -155,6 +163,14 @@ void parse_args(char *input, char **args, int *is_bg) {
       *is_bg = 1;
     } else {
       args[argc] = malloc(len + 1);
+      if (args[argc] == NULL) {
+        // Handle malloc failure - free previously allocated memory
+        for (int i = 0; i < argc; i++) {
+          free(args[i]);
+        }
+        args[0] = NULL;
+        return;
+      }
       strncpy(args[argc], start, len);
       args[argc][len] = '\0';
       argc++;
@@ -185,16 +201,19 @@ void exec_cmd(char *input) {
       }
       chdir(home);
     }
+    free_args(args);
     add_to_history(input);
     return;
 
   } else if (strcmp(args[0], "exit") == 0) {
+    free_args(args);
     printf("\x1b[2J\x1b[H");
     restore_term_settings();
     exit(0);
 
   } else if (strcmp(args[0], "jobs") == 0) {
     show_jobs();
+    free_args(args);
     add_to_history(input);
     return;
 
@@ -203,6 +222,7 @@ void exec_cmd(char *input) {
       bring_fg(atoi(args[1]));
       add_to_history(input);
     }
+    free_args(args);
     return;
 
   } else if (strcmp(args[0], "bg") == 0) {
@@ -210,12 +230,14 @@ void exec_cmd(char *input) {
       continue_job(atoi(args[1]));
       add_to_history(input);
     }
+    free_args(args);
     return;
 
   } else if (strcmp(args[0], "history") == 0) {
     for (int i = 0; i < history_count; i++) {
       printf("%d: %s\n", i + 1, history[i]);
     }
+    free_args(args);
     add_to_history(input);
     return;
   }
@@ -239,31 +261,40 @@ void exec_cmd(char *input) {
   if (num_cmds == 1) {
     pid_t pid = fork();
     if (pid == 0) {
+      // Child process - handle redirections
       for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], ">") == 0) {
           int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-          dup2(fd, STDOUT_FILENO);
-          close(fd);
+          if (fd != -1) {
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+          }
           args[i] = NULL;
           args[i + 1] = NULL;
         } else if (strcmp(args[i], ">>") == 0) {
           int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
-          dup2(fd, STDOUT_FILENO);
-          close(fd);
+          if (fd != -1) {
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+          }
           args[i] = NULL;
           args[i + 1] = NULL;
         } else if (strcmp(args[i], "<") == 0) {
           int fd = open(args[i + 1], O_RDONLY);
-          dup2(fd, STDIN_FILENO);
-          close(fd);
+          if (fd != -1) {
+            dup2(fd, STDIN_FILENO);
+            close(fd);
+          }
           args[i] = NULL;
           args[i + 1] = NULL;
         }
       }
       execvp(args[0], args);
+      // If execvp fails, we don't need to free args since the process will exit
       perror("exec failed");
       exit(1);
-    } else {
+    } else if (pid > 0) {
+      // Parent process
       if (!is_bg) {
         current_fg_pid = pid;
         int status;
@@ -276,17 +307,32 @@ void exec_cmd(char *input) {
         add_job(pid, input, 1);
         add_to_history(input);
       }
+      free_args(args);
+    } else {
+      // Fork failed
+      perror("fork failed");
+      free_args(args);
     }
     return;
   }
 
+  // Handle pipelines
   int pipefds[2 * (num_cmds - 1)];
-  for (int i = 0; i < num_cmds - 1; i++)
-    pipe(pipefds + i * 2);
+  for (int i = 0; i < num_cmds - 1; i++) {
+    if (pipe(pipefds + i * 2) == -1) {
+      perror("pipe failed");
+      free_args(args);
+      return;
+    }
+  }
 
-  for (int i = 0; i < num_cmds; i++) {
+  pid_t pids[10];
+  int fork_success = 1;
+
+  for (int i = 0; i < num_cmds && fork_success; i++) {
     pid_t pid = fork();
     if (pid == 0) {
+      // Child process
       if (i != 0)
         dup2(pipefds[(i - 1) * 2], 0);
       if (i != num_cmds - 1)
@@ -298,24 +344,35 @@ void exec_cmd(char *input) {
       execvp(cmds[i][0], cmds[i]);
       perror("exec failed");
       exit(1);
+    } else if (pid > 0) {
+      pids[i] = pid;
+    } else {
+      perror("fork failed");
+      fork_success = 0;
     }
   }
 
+  // Close all pipe file descriptors in parent
   for (int i = 0; i < 2 * (num_cmds - 1); i++)
     close(pipefds[i]);
 
-  int all_success = 1;
-  for (int i = 0; i < num_cmds; i++) {
-    int status;
-    wait(&status);
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-      all_success = 0;
+  if (fork_success) {
+    // Wait for all children and check if all succeeded
+    int all_success = 1;
+    for (int i = 0; i < num_cmds; i++) {
+      int status;
+      waitpid(pids[i], &status, 0);
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        all_success = 0;
+      }
+    }
+
+    if (all_success) {
+      add_to_history(input);
     }
   }
 
-  if (all_success) {
-    add_to_history(input);
-  }
+  free_args(args);
 }
 
 int main() {
