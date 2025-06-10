@@ -129,7 +129,6 @@ void add_to_history(char *command) {
   }
 }
 
-// Helper function to free arguments array
 void free_args(char **args) {
   for (int i = 0; args[i] != NULL; i++) {
     free(args[i]);
@@ -164,7 +163,6 @@ void parse_args(char *input, char **args, int *is_bg) {
     } else {
       args[argc] = malloc(len + 1);
       if (args[argc] == NULL) {
-        // Handle malloc failure - free previously allocated memory
         for (int i = 0; i < argc; i++) {
           free(args[i]);
         }
@@ -191,20 +189,26 @@ void exec_cmd(char *input) {
     return;
 
   if (strcmp(args[0], "cd") == 0) {
+    int result;
     if (args[1] != NULL) {
-      chdir(args[1]);
+      result = chdir(args[1]);
+      if (result == -1) {
+        perror("cd");
+      }
     } else {
       const char *home = getenv("HOME");
       if (!home) {
         struct passwd *pw = getpwuid(getuid());
         home = pw->pw_dir;
       }
-      chdir(home);
+      result = chdir(home);
+      if (result == -1) {
+        perror("cd");
+      }
     }
     free_args(args);
     add_to_history(input);
     return;
-
   } else if (strcmp(args[0], "exit") == 0) {
     free_args(args);
     printf("\x1b[2J\x1b[H");
@@ -238,7 +242,7 @@ void exec_cmd(char *input) {
       printf("%d: %s\n", i + 1, history[i]);
     }
     free_args(args);
-    add_to_history(input);
+    // NOTE: Do NOT add history command to history
     return;
   }
 
@@ -261,7 +265,6 @@ void exec_cmd(char *input) {
   if (num_cmds == 1) {
     pid_t pid = fork();
     if (pid == 0) {
-      // Child process - handle redirections
       for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], ">") == 0) {
           int fd = open(args[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -290,11 +293,9 @@ void exec_cmd(char *input) {
         }
       }
       execvp(args[0], args);
-      // If execvp fails, we don't need to free args since the process will exit
       perror("exec failed");
       exit(1);
     } else if (pid > 0) {
-      // Parent process
       if (!is_bg) {
         current_fg_pid = pid;
         int status;
@@ -309,14 +310,12 @@ void exec_cmd(char *input) {
       }
       free_args(args);
     } else {
-      // Fork failed
       perror("fork failed");
       free_args(args);
     }
     return;
   }
 
-  // Handle pipelines
   int pipefds[2 * (num_cmds - 1)];
   for (int i = 0; i < num_cmds - 1; i++) {
     if (pipe(pipefds + i * 2) == -1) {
@@ -332,7 +331,6 @@ void exec_cmd(char *input) {
   for (int i = 0; i < num_cmds && fork_success; i++) {
     pid_t pid = fork();
     if (pid == 0) {
-      // Child process
       if (i != 0)
         dup2(pipefds[(i - 1) * 2], 0);
       if (i != num_cmds - 1)
@@ -352,12 +350,10 @@ void exec_cmd(char *input) {
     }
   }
 
-  // Close all pipe file descriptors in parent
   for (int i = 0; i < 2 * (num_cmds - 1); i++)
     close(pipefds[i]);
 
   if (fork_success) {
-    // Wait for all children and check if all succeeded
     int all_success = 1;
     for (int i = 0; i < num_cmds; i++) {
       int status;
@@ -374,7 +370,6 @@ void exec_cmd(char *input) {
 
   free_args(args);
 }
-
 int main() {
   char input[MAX_CMD_LEN];
   char cwd[PATH_MAX];
@@ -400,10 +395,14 @@ int main() {
 
     fflush(stdout);
 
-    if (fgets(input, sizeof(input), stdin) == NULL)
+    ssize_t nread = read(STDIN_FILENO, input, sizeof(input) - 1);
+    if (nread <= 0)
       break;
 
-    input[strcspn(input, "\n")] = '\0';
+    input[nread] = '\0';
+
+    if (input[nread - 1] == '\n')
+      input[nread - 1] = '\0';
 
     if (strcmp(input, "!!") == 0) {
       if (history_count > 0) {
@@ -428,5 +427,7 @@ int main() {
       exec_cmd(input);
     }
   }
+
+  restore_term_settings();
   return 0;
 }
