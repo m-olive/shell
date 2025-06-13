@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/limits.h>
@@ -299,11 +300,14 @@ void exec_cmd(char *input) {
       if (!is_bg) {
         current_fg_pid = pid;
         int status;
+
         waitpid(pid, &status, WUNTRACED);
-        current_fg_pid = 0;
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        if (WIFSTOPPED(status)) {
+          add_job(pid, input, 0);
+        } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
           add_to_history(input);
         }
+        current_fg_pid = 0;
       } else {
         add_job(pid, input, 1);
         add_to_history(input);
@@ -396,9 +400,14 @@ int main() {
     fflush(stdout);
 
     ssize_t nread = read(STDIN_FILENO, input, sizeof(input) - 1);
-    if (nread <= 0)
-      break;
 
+    if (nread < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (nread == 0)
+      break;
     input[nread] = '\0';
 
     if (input[nread - 1] == '\n')
