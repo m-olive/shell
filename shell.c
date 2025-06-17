@@ -39,7 +39,6 @@ void sigtstp_handler(int sig) {
 void sigchld_handler(int sig) {
   int status;
   pid_t pid;
-
   while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
     for (int i = 0; i < job_count; i++) {
       if (jobs[i].pid == pid) {
@@ -60,7 +59,6 @@ void add_job(pid_t pid, char *command, int running) {
   jobs[job_count].command[MAX_CMD_LEN - 1] = '\0';
   jobs[job_count].running = running;
   jobs[job_count].stopped = !running;
-
   job_count++;
 }
 
@@ -79,7 +77,6 @@ void continue_job(int id) {
       kill(jobs[i].pid, SIGCONT);
       jobs[i].running = 1;
       jobs[i].stopped = 0;
-
       return;
     }
   }
@@ -92,7 +89,6 @@ void bring_fg(int id) {
       kill(current_fg_pid, SIGCONT);
       jobs[i].running = 1;
       jobs[i].stopped = 0;
-
       int status;
       waitpid(current_fg_pid, &status, WUNTRACED);
       if (WIFSTOPPED(status)) {
@@ -139,13 +135,11 @@ void free_args(char **args) {
 void parse_args(char *input, char **args, int *is_bg) {
   int argc = 0;
   *is_bg = 0;
-
   while (*input) {
     while (*input == ' ')
       input++;
     if (*input == '\0')
       break;
-
     char *start;
     if (*input == '"' || *input == '\'') {
       char quote = *input++;
@@ -157,7 +151,6 @@ void parse_args(char *input, char **args, int *is_bg) {
       while (*input && *input != ' ')
         input++;
     }
-
     int len = input - start;
     if (len == 1 && start[0] == '&') {
       *is_bg = 1;
@@ -183,19 +176,15 @@ void parse_args(char *input, char **args, int *is_bg) {
 void exec_cmd(char *input) {
   char *args[64];
   int is_bg = 0;
-
   parse_args(input, args, &is_bg);
-
   if (args[0] == NULL)
     return;
-
   if (strcmp(args[0], "cd") == 0) {
     int result;
     if (args[1] != NULL) {
       result = chdir(args[1]);
-      if (result == -1) {
+      if (result == -1)
         perror("cd");
-      }
     } else {
       const char *home = getenv("HOME");
       if (!home) {
@@ -203,9 +192,8 @@ void exec_cmd(char *input) {
         home = pw->pw_dir;
       }
       result = chdir(home);
-      if (result == -1) {
+      if (result == -1)
         perror("cd");
-      }
     }
     free_args(args);
     add_to_history(input);
@@ -215,13 +203,11 @@ void exec_cmd(char *input) {
     printf("\x1b[2J\x1b[H");
     restore_term_settings();
     exit(0);
-
   } else if (strcmp(args[0], "jobs") == 0) {
     show_jobs();
     free_args(args);
     add_to_history(input);
     return;
-
   } else if (strcmp(args[0], "fg") == 0) {
     if (args[1]) {
       bring_fg(atoi(args[1]));
@@ -229,7 +215,6 @@ void exec_cmd(char *input) {
     }
     free_args(args);
     return;
-
   } else if (strcmp(args[0], "bg") == 0) {
     if (args[1]) {
       continue_job(atoi(args[1]));
@@ -237,20 +222,17 @@ void exec_cmd(char *input) {
     }
     free_args(args);
     return;
-
   } else if (strcmp(args[0], "history") == 0) {
     for (int i = 0; i < history_count; i++) {
       printf("%d: %s\n", i + 1, history[i]);
     }
     free_args(args);
-    // NOTE: Do NOT add history command to history
     return;
   }
 
   int num_cmds = 0;
   char *cmds[10][64];
   int cmd_index = 0, arg_index = 0;
-
   for (int i = 0; args[i] != NULL; i++) {
     if (strcmp(args[i], "|") == 0) {
       cmds[cmd_index][arg_index] = NULL;
@@ -300,7 +282,6 @@ void exec_cmd(char *input) {
       if (!is_bg) {
         current_fg_pid = pid;
         int status;
-
         waitpid(pid, &status, WUNTRACED);
         if (WIFSTOPPED(status)) {
           add_job(pid, input, 0);
@@ -319,7 +300,6 @@ void exec_cmd(char *input) {
     }
     return;
   }
-
   int pipefds[2 * (num_cmds - 1)];
   for (int i = 0; i < num_cmds - 1; i++) {
     if (pipe(pipefds + i * 2) == -1) {
@@ -328,10 +308,8 @@ void exec_cmd(char *input) {
       return;
     }
   }
-
   pid_t pids[10];
   int fork_success = 1;
-
   for (int i = 0; i < num_cmds && fork_success; i++) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -339,10 +317,8 @@ void exec_cmd(char *input) {
         dup2(pipefds[(i - 1) * 2], 0);
       if (i != num_cmds - 1)
         dup2(pipefds[i * 2 + 1], 1);
-
       for (int j = 0; j < 2 * (num_cmds - 1); j++)
         close(pipefds[j]);
-
       execvp(cmds[i][0], cmds[i]);
       perror("exec failed");
       exit(1);
@@ -353,10 +329,8 @@ void exec_cmd(char *input) {
       fork_success = 0;
     }
   }
-
   for (int i = 0; i < 2 * (num_cmds - 1); i++)
     close(pipefds[i]);
-
   if (fork_success) {
     int all_success = 1;
     for (int i = 0; i < num_cmds; i++) {
@@ -366,29 +340,26 @@ void exec_cmd(char *input) {
         all_success = 0;
       }
     }
-
     if (all_success) {
       add_to_history(input);
     }
   }
-
   free_args(args);
 }
+
 int main() {
   char input[MAX_CMD_LEN];
   char cwd[PATH_MAX];
   char hostname[HOST_NAME_MAX + 1];
-
   int res = gethostname(hostname, HOST_NAME_MAX);
   uid_t uid = getuid();
   struct passwd *pw = getpwuid(uid);
-
   signal(SIGTSTP, sigtstp_handler);
   signal(SIGCHLD, sigchld_handler);
-
   printf("\x1b[2J\x1b[H");
   disable_echoctl();
-
+  int pos = 0;
+  char c;
   while (1) {
     if (getcwd(cwd, sizeof(cwd)) != NULL)
       printf("\x1b[92m[%s]\x1b[0m on \x1b[33m[%s]\x1b[0m >> \x1b[95m%s\x1b[0m "
@@ -396,23 +367,18 @@ int main() {
              pw->pw_name, hostname, cwd);
     else
       perror("getcwd error");
-
     fflush(stdout);
-
-    ssize_t nread = read(STDIN_FILENO, input, sizeof(input) - 1);
-
-    if (nread < 0) {
-      if (errno == EINTR)
-        continue;
-      break;
+    pos = 0;
+    while (read(STDIN_FILENO, &c, 1) == 1) {
+      if (c == '\n') {
+        input[pos] = '\0';
+        break;
+      } else if (pos < MAX_CMD_LEN - 1) {
+        input[pos++] = c;
+      }
     }
-    if (nread == 0)
-      break;
-    input[nread] = '\0';
-
-    if (input[nread - 1] == '\n')
-      input[nread - 1] = '\0';
-
+    if (pos == 0)
+      continue;
     if (strcmp(input, "!!") == 0) {
       if (history_count > 0) {
         strcpy(input, history[history_count - 1]);
@@ -431,12 +397,10 @@ int main() {
         continue;
       }
     }
-
     if (strlen(input) > 0) {
       exec_cmd(input);
     }
   }
-
   restore_term_settings();
   return 0;
 }
