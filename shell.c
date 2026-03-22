@@ -9,7 +9,6 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <termio.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -21,10 +20,10 @@ typedef struct {
   pid_t pid;
   char command[MAX_CMD_LEN];
   int running;
-  int stopped;
 } Job;
 
 pid_t current_fg_pid = 0;
+struct termios orig_term;
 char history[50][1024];
 int history_count = 0;
 Job jobs[MAX_JOBS];
@@ -58,13 +57,12 @@ void add_job(pid_t pid, char *command, int running) {
   strncpy(jobs[job_count].command, command, MAX_CMD_LEN - 1);
   jobs[job_count].command[MAX_CMD_LEN - 1] = '\0';
   jobs[job_count].running = running;
-  jobs[job_count].stopped = !running;
   job_count++;
 }
 
 void show_jobs() {
   for (int i = 0; i < job_count; i++) {
-    const char *state = jobs[i].stopped ? "Stopped" : "Running";
+    const char *state = jobs[i].running ? "Running" : "Stopped";
     printf("\x1b[95m[%d] ID:\x1b[0m %d / \x1b[95mStatus:\x1b[0m %s / "
            "\x1b[95mCommand:\x1b[0m %s\n",
            jobs[i].id, jobs[i].pid, state, jobs[i].command);
@@ -76,7 +74,6 @@ void continue_job(int id) {
     if (jobs[i].id == id) {
       kill(jobs[i].pid, SIGCONT);
       jobs[i].running = 1;
-      jobs[i].stopped = 0;
       return;
     }
   }
@@ -88,17 +85,17 @@ void bring_fg(int id) {
       current_fg_pid = jobs[i].pid;
       kill(current_fg_pid, SIGCONT);
       jobs[i].running = 1;
-      jobs[i].stopped = 0;
       int status;
-      waitpid(current_fg_pid, &status, WUNTRACED);
-      if (WIFSTOPPED(status)) {
-        jobs[i].stopped = 1;
-        jobs[i].running = 0;
-      } else {
-        for (int j = i; j < job_count - 1; j++) {
-          jobs[j] = jobs[j + 1];
+      pid_t ret = waitpid(current_fg_pid, &status, WUNTRACED);
+      if (ret > 0) {
+        if (WIFSTOPPED(status)) {
+          jobs[i].running = 0;
+        } else {
+          for (int j = i; j < job_count - 1; j++) {
+            jobs[j] = jobs[j + 1];
+          }
+          job_count--;
         }
-        job_count--;
       }
       current_fg_pid = 0;
       return;
@@ -107,18 +104,14 @@ void bring_fg(int id) {
 }
 
 void disable_echoctl() {
-  struct termios term;
-  tcgetattr(STDIN_FILENO, &term);
-  term.c_lflag &= ~ECHOCTL;
-  tcsetattr(STDIN_FILENO, TCSANOW, &term);
+  struct termios raw;
+  tcgetattr(STDIN_FILENO, &orig_term);
+  raw = orig_term;
+  raw.c_lflag &= ~(ICANON | ECHO | ECHOCTL);
+  tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
 
-void restore_term_settings() {
-  struct termios term;
-  tcgetattr(STDIN_FILENO, &term);
-  term.c_lflag |= ECHOCTL;
-  tcsetattr(STDIN_FILENO, TCSANOW, &term);
-}
+void restore_term_settings() { tcsetattr(STDIN_FILENO, TCSANOW, &orig_term); }
 
 void add_to_history(char *command) {
   if (strlen(command) > 0 && history_count < 50) {
@@ -209,8 +202,10 @@ void exec_cmd(char *input) {
     add_to_history(input);
     return;
   } else if (strcmp(args[0], "fg") == 0) {
-    if (args[1]) {
-      bring_fg(atoi(args[1]));
+    int id =
+        args[1] ? atoi(args[1]) : (job_count > 0 ? jobs[job_count - 1].id : -1);
+    if (id != -1) {
+      bring_fg(id);
       add_to_history(input);
     }
     free_args(args);
@@ -359,6 +354,7 @@ int main() {
   printf("\x1b[2J\x1b[H");
   disable_echoctl();
   int pos = 0;
+  int cursor = 0;
   char c;
   while (1) {
     if (getcwd(cwd, sizeof(cwd)) != NULL)
@@ -369,12 +365,45 @@ int main() {
       perror("getcwd error");
     fflush(stdout);
     pos = 0;
+    cursor = 0;
     while (read(STDIN_FILENO, &c, 1) == 1) {
-      if (c == '\n') {
+      if (c == '\n' || c == '\r') {
         input[pos] = '\0';
+        write(STDOUT_FILENO, "\n", 1);
         break;
-      } else if (pos < MAX_CMD_LEN - 1) {
-        input[pos++] = c;
+      } else if (c == 0x7f || c == '\b') {
+        if (cursor > 0) {
+          memmove(input + cursor - 1, input + cursor, pos - cursor);
+          pos--;
+          cursor--;
+          input[pos] = '\0';
+          write(STDOUT_FILENO, "\b", 1);
+          write(STDOUT_FILENO, input + cursor, pos - cursor);
+          write(STDOUT_FILENO, " ", 1);
+          for (int k = pos - cursor + 1; k > 0; k--)
+            write(STDOUT_FILENO, "\b", 1);
+        }
+      } else if (c == 0x1b) {
+        char seq[2];
+        if (read(STDIN_FILENO, &seq[0], 1) == 1 && seq[0] == '[' &&
+            read(STDIN_FILENO, &seq[1], 1) == 1) {
+          if (seq[1] == 'C' && cursor < pos) {
+            cursor++;
+            write(STDOUT_FILENO, "\x1b[C", 3);
+          } else if (seq[1] == 'D' && cursor > 0) {
+            cursor--;
+            write(STDOUT_FILENO, "\x1b[D", 3);
+          }
+        }
+      } else if (c >= 32 && pos < MAX_CMD_LEN - 1) {
+        memmove(input + cursor + 1, input + cursor, pos - cursor);
+        input[cursor] = c;
+        pos++;
+        input[pos] = '\0';
+        write(STDOUT_FILENO, input + cursor, pos - cursor);
+        cursor++;
+        for (int k = pos - cursor; k > 0; k--)
+          write(STDOUT_FILENO, "\b", 1);
       }
     }
     if (pos == 0)
